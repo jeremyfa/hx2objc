@@ -1,0 +1,9 @@
+{
+	"name": "hx2objc",
+	"url": "https://github.com/jeremyfa/hx2objc",
+	"license": "MIT",
+	"tags": ["Haxe", "Objective-C", "Swift", "HXCPP", "Objective-C++", "C++"],
+	"description": "Macros to automatically generate bindings from Haxe/HXCPP to Objective-C/Swift compatible code.",
+	"version": "0.1.0",
+	"contributors": [ "jeremyfa" ]
+}
