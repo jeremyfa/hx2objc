@@ -21,12 +21,23 @@ typedef FieldInfo = {
     @:optional var is_method: Bool;
 }
 
+typedef ObjcTypeInfo = {
+    var field_info: FieldInfo;
+    var arg_name: String;
+}
+
+typedef ExportOptions = {
+    @:optional var prefix: String;
+    @:optional var embed: Bool;
+}
+
 class Macros {
 
     private static var called_once: Bool = false;
     private static var export_base_path: String = null;
     private static var export_base_name: String = null;
     private static var export_prefix: String = null;
+    private static var export_embed_in_binary: Bool = false;
 
     private static var classes: Map<String,ClassInfo>;
     private static var class_with_build_meta = null;
@@ -35,27 +46,46 @@ class Macros {
     private static var write_buffer: StringBuf;
 
         // Set the export path for Objective-C bridge
-    macro static public function export(base_path:String, prefix:String = "HX"):Void {
+    macro static public function configure(base_path:String, ?options:ExportOptions):Void {
         #if !(display || lint)
                 // Initialize static properties
+            if (options == null) options = {};
             if (base_path.length > 0) {
                 if (base_path.charAt(0) != "/") {
                         // Configure base path
                     export_base_path = (Sys.getCwd() + "/" + base_path).split("//").join("/").split("app/../").join("/").split("//").join("/");
                     export_base_name = base_path.substr(base_path.lastIndexOf('/') + 1);
-                    export_prefix = prefix;
+                    if (options.prefix != null) {
+                        export_prefix = options.prefix;
+                    } else {
+                        export_prefix = "HX";
+                    }
+                    if (options.embed == true) {
+                        export_embed_in_binary = true;
+                    }
                     classes = new Map<String,ClassInfo>();
 
-                    log("Generate Objective-C (prefix=" + export_prefix + "):");
+                    log("Generate Objective-C (prefix: " + export_prefix + "):");
                     log("  " + export_base_path + ".h");
                     log("  " + export_base_path + ".mm");
                 }
             }
+
+            Context.onGenerate(function(types:Array<haxe.macro.Type>):Void {
+
+                    // Dump Objective-C header
+                dump_objc_header();
+
+                    // Dump Objective-C++ implementation
+                dump_objcpp_implementation();
+
+                log('Saved files.');
+            });
         #end
     }
 
         // Generate the Objective-C++ bindings for the given class
-    macro static public function generate(?objc_class_name:String):Array<Field> {
+    macro static public function export(?objc_class_name:String):Array<Field> {
         if (export_base_path == null) return Context.getBuildFields();
 
             // Create class info
@@ -69,19 +99,20 @@ class Macros {
         class_info.name = Context.getLocalClass().get().name;
         class_info.pack = Context.getLocalClass().get().pack;
 
-        var build_xml = '
-        <files id="haxe">
-            <compilerflag value="-fobjc-arc" />
-            <file name="'+export_base_path+'.mm">
-                <depend name="$'+'{HXCPP}/include/hx/Macros.h" />
-                <depend name="$'+'{HXCPP}/include/hx/CFFI.h" />
-            </file>
-        </files>';
-        if (class_with_build_meta == null) {
+        if (export_embed_in_binary && class_with_build_meta == null) {
+            log("Patch Build.xml to embed Objective-C interface.");
+            var build_xml = '
+            <files id="haxe">
+                <compilerflag value="-fobjc-arc" />
+                <file name="'+export_base_path+'.mm">
+                    <depend name="$'+'{HXCPP}/include/hx/Macros.h" />
+                    <depend name="$'+'{HXCPP}/include/hx/CFFI.h" />
+                </file>
+            </files>';
             class_with_build_meta = Context.getLocalClass().get();
+            class_with_build_meta.meta.remove(":buildXml");
+            class_with_build_meta.meta.add(":buildXml", [macro $v{build_xml}], Context.currentPos());
         }
-        class_with_build_meta.meta.remove(":buildXml");
-        class_with_build_meta.meta.add(":buildXml", [macro $v{build_xml}], Context.currentPos());
 
             // Compute fields
         var fields = Context.getBuildFields();
@@ -126,12 +157,6 @@ class Macros {
 
             // Add class info
         classes.set(class_info.name, class_info);
-
-            // Dump Objective-C header
-        dump_objc_header();
-
-            // Dump Objective-C++ implementation
-        dump_objcpp_implementation();
 
         return fields;
     }
@@ -213,7 +238,7 @@ class Macros {
                         var objc_arguments:Array<String> = [];
                         var i = 0;
                         for (arg in field_info.func.args) {
-                            var entry = "(" + get_objc_type(arg.type) + ")" + camelize(arg.name);
+                            var entry = "(" + get_objc_type(arg.type, {field_info: field_info, arg_name: arg.name}) + ")" + camelize(arg.name);
                             if (i > 0) {
                                 entry = camelize(arg.name) + ":" + entry;
                             }
@@ -294,6 +319,7 @@ class Macros {
             // Write HXObject class interface
         write_indented_line("// Haxe object base class");
         write_indented_line("@interface HXObject ()");
+        write_indented_line("@property AutoGCRoot *haxeInstance;");
         write_indented_line("- (instancetype)initWithHaxeInstance:(AutoGCRoot *)haxeInstance;");
         write_indented_line("@end");
         write_line_break();
@@ -368,7 +394,7 @@ class Macros {
                         var objc_arguments:Array<String> = [];
                         var i = 0;
                         for (arg in field_info.func.args) {
-                            var entry = "(" + get_objc_type(arg.type) + ")" + camelize(arg.name);
+                            var entry = "(" + get_objc_type(arg.type, {field_info: field_info, arg_name: arg.name}) + ")" + camelize(arg.name);
                             if (i > 0) {
                                 entry = camelize(arg.name) + ":" + entry;
                             }
@@ -788,7 +814,7 @@ class Macros {
         }
     }
 
-    private static function get_objc_type(?t:ComplexType):String {
+    private static function get_objc_type(?t:ComplexType, ?type_info:ObjcTypeInfo):String {
         if (t == null) return "void";
 
         var type_name: String = null;
@@ -799,7 +825,7 @@ class Macros {
         switch (t) {
 
             case TOptional(t):
-                return get_objc_type(t);
+                return get_objc_type(t, type_info);
 
             case TPath(typep):
                 type_path = typep;
@@ -817,9 +843,16 @@ class Macros {
 
             case TFunction(fn_args, fn_ret):
                 type_name = "Function";
+                if (type_info != null) {
+                    for (meta in type_info.field_info.field.meta) {
+                        trace(meta);
+                    }
+                }
                 var args = [];
                 for (arg in fn_args) {
-                    args.push(get_objc_type(arg));
+                    var arg_str = get_objc_type(arg);
+
+                    args.push(arg_str);
                 }
                 type_signature = get_objc_type(fn_ret) + " (^)(" + args.join(", ") + ")";
 
